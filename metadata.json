@@ -1,0 +1,6 @@
+{
+  "name": "Rangkuman SPT & Arus Kas",
+  "description": "Aplikasi web modern untuk membaca, memproses, dan merangkum file Excel SPT Tahunan Orang Pribadi serta analisis arus kas otomatis menggunakan SheetJS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
