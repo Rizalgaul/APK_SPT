@@ -84,6 +84,17 @@ export default function App() {
   const [monthlyLivingCost, setMonthlyLivingCost] = useState<number>(10000000); // Rp 10jt / bulan
   const [additionalInflow, setAdditionalInflow] = useState<number>(0); // Pembagian warisan/hibah non-objek
   const [additionalOutflow, setAdditionalOutflow] = useState<number>(0); // Hutang lunas atau bayar bunga non-kapitalisasi
+
+  // Mode Analisis Switcher:
+  const [analysisMode, setAnalysisMode] = useState<"makro" | "rincian">("makro");
+
+  // State Makro Arus Kas dari Sheet "Arus Kas"
+  const [macroKasAwal, setMacroKasAwal] = useState<number>(50000000);
+  const [macroHarta, setMacroHarta] = useState<number>(200050000); 
+  const [macroPenghasilan, setMacroPenghasilan] = useState<number>(360000000);
+  
+  // Cache data sheet Arus Kas
+  const [arusKasSheetData, setArusKasSheetData] = useState<any[][] | null>(null);
   
   // Filter & Toggle views
   const [collapsibles, setCollapsibles] = useState({
@@ -119,13 +130,39 @@ export default function App() {
     setIsDemo(true);
     setParsedItems(JSON.parse(JSON.stringify(SIMULATED_DATA)));
     setSelectedYear(2024);
+    
+    // Set Makro State dengan data awal 2024
+    setMacroKasAwal(50000000);
+    setMacroHarta(200050000);
+    setMacroPenghasilan(360000000);
     setManualInitialCash(50000000);
     setMonthlyLivingCost(10000000);
     setAdditionalInflow(0);
     setAdditionalOutflow(0);
+    setAnalysisMode("makro");
+
+    // Persiapkan MOCK ARUS KAS SPREADSHEEET yang sesuai spesifikasi Chandra Wimba
+    const mockArusKasRows: any[][] = [];
+    for (let i = 0; i < 25; i++) {
+      mockArusKasRows.push(Array(10).fill(""));
+    }
+    mockArusKasRows[0] = ["LAPORAN REKONSILIASI KAS MAKRO - CHANDRA WIMBA", "", "", "", "", "", "", "", ""];
+    mockArusKasRows[2] = ["Uraian Laporan", "", "", "", "2021 (Kolom E)", "2022 (Kolom F)", "2023 (Kolom G)", "2024 (Kolom H)"];
+    
+    mockArusKasRows[12] = ["Total Kas Awal", "", "", "", 10000000, 30000000, 40000000, 50000000]; // Index 12
+    mockArusKasRows[16] = ["Penambahan/Pengurangan Harta", "", "", "", 30000050, 120000000, 50000000, 200050000]; // Index 16
+    mockArusKasRows[17] = ["Penghasilan", "", "", "", 150000000, 280000000, 310000000, 360000000]; // Index 17
+
+    setArusKasSheetData(mockArusKasRows);
 
     // Mock sheet overview untuk visualisasi data sheet explorer
     setSheetsList([
+      {
+        name: "Arus Kas",
+        rowCount: 25,
+        colCount: 8,
+        previewRows: mockArusKasRows.slice(0, 20)
+      },
       {
         name: "Penghasilan Neto 2024",
         rowCount: 14,
@@ -163,13 +200,41 @@ export default function App() {
         ]
       }
     ]);
-    setActiveSheetPreview("Penghasilan Neto 2024");
+    setActiveSheetPreview("Arus Kas");
   };
 
   // Trigger load demo di awal render agar screen tidak kosong (excellent user-experience)
   useEffect(() => {
     loadDemoData();
   }, []);
+
+  // Sinkronisasi otomatis ketika Tahun Pajak yang dipilih berubah atau data Sheet Arus Kas dimuat
+  useEffect(() => {
+    if (arusKasSheetData) {
+      let colIdx = 7; // default 2024 (Kolom H)
+      if (selectedYear === 2021) colIdx = 4; // Kolom E
+      else if (selectedYear === 2022) colIdx = 5; // Kolom F
+      else if (selectedYear === 2023) colIdx = 6; // Kolom G
+      else if (selectedYear === 2024) colIdx = 7; // Kolom H
+      
+      const parseVal = (rowObj: any[], cIdx: number) => {
+        if (!rowObj || rowObj[cIdx] === undefined || rowObj[cIdx] === null || rowObj[cIdx] === "") return 0;
+        const v = rowObj[cIdx];
+        if (typeof v === "number") return v;
+        const parsed = parseFloat(String(v).replace(/[^0-9.-]+/g, ""));
+        return isNaN(parsed) ? 0 : parsed;
+      };
+
+      const parsedKas = parseVal(arusKasSheetData[12], colIdx);
+      const parsedHarta = parseVal(arusKasSheetData[16], colIdx);
+      const parsedPenghasilan = parseVal(arusKasSheetData[17], colIdx);
+
+      setMacroKasAwal(parsedKas);
+      setManualInitialCash(parsedKas);
+      setMacroHarta(parsedHarta);
+      setMacroPenghasilan(parsedPenghasilan);
+    }
+  }, [selectedYear, arusKasSheetData]);
 
   // ==========================================
   // JAVASCRIPT EXCEL PARSING LOGIC (SHEETJS)
@@ -193,6 +258,8 @@ export default function App() {
         
         let foundItems: ParsedItem[] = [];
         let createdSheetsMeta: SheetOverview[] = [];
+        let tempArusKasRows: any[][] | null = null;
+        let foundArusKasSheet = false;
 
         // Iterasi semua worksheet di dalam Excel
         sheetNames.forEach((sheetName) => {
@@ -205,18 +272,19 @@ export default function App() {
               name: sheetName,
               rowCount: rawRows.length,
               colCount: rawRows[0].length || 0,
-              previewRows: rawRows.slice(0, 15) // Kita simpan 15 baris pertama untuk explorer UI
+              previewRows: rawRows.slice(0, 25) // Kita simpan 25 baris pertama untuk explorer UI
             });
           }
 
-          // Normalisasi nama sheet menjadi huruf kecil untuk pelacakan pintar
-          const lowSheetName = sheetName.toLowerCase();
+          const lowSheetName = sheetName.toLowerCase().trim();
 
-          // ----------------------------------------------------
-          // CATATAN UNTUK PENGGUNA:
-          // Di bawah ini adalah KATA KUNCI pencocokan Sheet.
-          // Jika nama sheet di Excel Anda berbeda, ubah teks berikut:
-          // ----------------------------------------------------
+          // KHUSUS: Parsing lembar "Arus Kas"
+          if (lowSheetName === "arus kas") {
+            foundArusKasSheet = true;
+            tempArusKasRows = rawRows;
+          }
+
+          // Normalisasi pencarian rincian item
           const isIncomeSheet = lowSheetName.includes("penghasilan") || lowSheetName.includes("gaji") || lowSheetName.includes("neto") || lowSheetName.includes("netto") || lowSheetName.includes("bukti potong") || lowSheetName.includes("income");
           const isAssetSheet = lowSheetName.includes("harta") || lowSheetName.includes("aset") || lowSheetName.includes("asset") || lowSheetName.includes("kepemilikan") || lowSheetName.includes("harta baru");
           const isDebtSheet = lowSheetName.includes("hutang") || lowSheetName.includes("utang") || lowSheetName.includes("kewajiban") || lowSheetName.includes("liability") || lowSheetName.includes("liabilities");
@@ -228,24 +296,19 @@ export default function App() {
               const cellStr = String(cellValue).trim();
               const lowCellStr = cellStr.toLowerCase();
 
-              // Heuristik parsing angka dari sel-sel berikutnya di baris yang sama
               const extractLastNumberInRow = (currentRow: any[], startColIndex: number): number => {
-                // Cari angka terbesar di sebelah kanan sel keyword tersebut
                 for (let i = currentRow.length - 1; i > startColIndex; i--) {
                   const val = currentRow[i];
                   if (typeof val === "number") return val;
                   if (val && !isNaN(Number(String(val).replace(/[^0-9.-]+/g, "")))) {
                     const parsed = parseFloat(String(val).replace(/[^0-9.-]+/g, ""));
-                    if (parsed > 1000) return parsed; // Menghindari parsing indeks nomor 1, 2, dsb
+                    if (parsed > 1000) return parsed;
                   }
                 }
                 return 0;
               };
 
-              // -----------------------------------------------------------------------
               // LOGIKA KATA KUNCI 1: PENGHASILAN / GAJI / NETO
-              // Jika sheet terindikasi sebagai tempat penghasilan atau sel mengandung kata kunci
-              // -----------------------------------------------------------------------
               const matchesIncomeKeyword = 
                 lowCellStr.includes("gaji") || 
                 lowCellStr.includes("honorarium") || 
@@ -258,9 +321,7 @@ export default function App() {
 
               if ((isIncomeSheet || matchesIncomeKeyword) && !lowCellStr.includes("jumlah") && !lowCellStr.includes("total") && !lowCellStr.includes("pajak")) {
                 const matchedNum = extractLastNumberInRow(row, colIdx);
-                // Hanya simpan jika angkanya masuk akal (> Rp 100.000)
                 if (matchedNum > 100000) {
-                  // Pastikan deskripsi tidak berupa angka saja atau kosong
                   const isCleanDesc = cellStr.length > 3 && isNaN(Number(cellStr));
                   if (isCleanDesc) {
                     foundItems.push({
@@ -277,10 +338,7 @@ export default function App() {
                 }
               }
 
-              // -----------------------------------------------------------------------
               // LOGIKA KATA KUNCI 2: HARTA / ASET
-              // Mencari aset yang dimiliki wajib pajak beserta tahun perolehan
-              // -----------------------------------------------------------------------
               const matchesAssetKeyword = 
                 lowCellStr.includes("mobil") || 
                 lowCellStr.includes("motor") || 
@@ -294,14 +352,12 @@ export default function App() {
                 lowCellStr.includes("logam mulia");
 
               if (isAssetSheet || matchesAssetKeyword) {
-                // Harta sering kali berada dalam format tabel: Nama Harta | Tahun Perolehan | Harga Perolehan
                 if (!lowCellStr.includes("kode") && !lowCellStr.includes("harta") && !lowCellStr.includes("total") && !lowCellStr.includes("jumlah")) {
-                  // Cari apakah ada tahun perolehan di dalam baris yang sama (biasanya antara 1980 - 2026)
-                  let yearVal = 2020; // Default fallback year
+                  let yearVal = 2020;
                   let foundYear = false;
                   let assetValue = 0;
 
-                  row.forEach((v, idx) => {
+                  row.forEach((v) => {
                     if (typeof v === "number" && v >= 1970 && v <= 2026) {
                       yearVal = v;
                       foundYear = true;
@@ -311,7 +367,6 @@ export default function App() {
                     }
                   });
 
-                  // Ambil nilai perolehan terbesar selain dari tahun
                   let highestNum = 0;
                   row.forEach((v) => {
                     let candidate = 0;
@@ -327,7 +382,7 @@ export default function App() {
 
                   assetValue = highestNum;
 
-                  if (assetValue > 1000000) { // Harta biasanya dinilai di atas 1 juta rupiah
+                  if (assetValue > 1000000) {
                     const isCleanAssetDesc = cellStr.length > 3 && isNaN(Number(cellStr));
                     if (isCleanAssetDesc && !foundItems.some(item => item.description.includes(cellStr))) {
                       foundItems.push({
@@ -346,9 +401,7 @@ export default function App() {
                 }
               }
 
-              // -----------------------------------------------------------------------
               // LOGIKA KATA KUNCI 3: HUTANG / KEWAJIBAN
-              // -----------------------------------------------------------------------
               const matchesDebtKeyword = 
                 lowCellStr.includes("kredit") || 
                 lowCellStr.includes("kpr") || 
@@ -390,16 +443,49 @@ export default function App() {
           });
         });
 
-        // Jika tidak ada data yang terdeteksi, coba dengan pencarian yang lebih umum
-        if (foundItems.length === 0) {
-          // Cari sheet apapun yang memiliki baris dan kolom berisi numerik dan label string
+        // ----------------------------------------------------
+        // PROSES DAN MAINKAN MODE MAKRO JIKA SHEET ARUS KAS ADA
+        // ----------------------------------------------------
+        if (foundArusKasSheet && tempArusKasRows) {
+          setArusKasSheetData(tempArusKasRows);
+          
+          let colIdx = 7; // default 2024
+          if (selectedYear === 2021) colIdx = 4;
+          else if (selectedYear === 2022) colIdx = 5;
+          else if (selectedYear === 2023) colIdx = 6;
+          else if (selectedYear === 2024) colIdx = 7;
+
+          const parseVal = (rowObj: any[], cIdx: number) => {
+            if (!rowObj || rowObj[cIdx] === undefined || rowObj[cIdx] === null || rowObj[cIdx] === "") return 0;
+            const v = rowObj[cIdx];
+            if (typeof v === "number") return v;
+            const parsed = parseFloat(String(v).replace(/[^0-9.-]+/g, ""));
+            return isNaN(parsed) ? 0 : parsed;
+          };
+
+          const rowsArray = tempArusKasRows as any[][];
+          const parsedKas = parseVal(rowsArray[12], colIdx);
+          const parsedHarta = parseVal(rowsArray[16], colIdx);
+          const parsedPenghasilan = parseVal(rowsArray[17], colIdx);
+
+          setMacroKasAwal(parsedKas);
+          setManualInitialCash(parsedKas);
+          setMacroHarta(parsedHarta);
+          setMacroPenghasilan(parsedPenghasilan);
+          setAnalysisMode("makro");
+          
+          // Informasikan keberhasilan pembacaan data "Arus Kas"
+          alert(`Sukses mendeteksi Sheet "Arus Kas"!\n\nAuto-fill untuk Tahun ${selectedYear}:\n- Kas Awal: ${formatRupiah(parsedKas)}\n- Belanja Harta: ${formatRupiah(parsedHarta)}\n- Penghasilan: ${formatRupiah(parsedPenghasilan)}\n\nKalkulator telah diperbarui secara instan.`);
+        }
+
+        // Fallback jika tidak ada data detail di sheet lain
+        if (foundItems.length === 0 && !foundArusKasSheet) {
           sheetNames.forEach(sheetName => {
             const worksheet = workbook.Sheets[sheetName];
             const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
             rawRows.slice(0, 50).forEach((row, rowIdx) => {
               row.forEach((cellVal, colIdx) => {
                 if (typeof cellVal === "string" && cellVal.length > 3 && isNaN(Number(cellVal))) {
-                  // Jika disebelah kanannya ada angka besar
                   row.forEach((nextCell, nextIdx) => {
                     if (nextIdx > colIdx && typeof nextCell === "number" && nextCell > 500000) {
                       foundItems.push({
@@ -422,17 +508,18 @@ export default function App() {
         }
 
         // Simpan hasil ke state utama
+        setFileName(file.name);
+        setIsDemo(false);
+        setSheetsList(createdSheetsMeta);
+        
         if (foundItems.length > 0) {
           setParsedItems(foundItems);
-          setFileName(file.name);
-          setIsDemo(false);
-          setSheetsList(createdSheetsMeta);
-          if (createdSheetsMeta.length > 0) {
-            setActiveSheetPreview(createdSheetsMeta[0].name);
-          }
-        } else {
-          alert("Excel terbaca, namun kami tidak menemukan format data wajib pajak yang cocok. Kami telah memuat mode data interaktif simulasi sebagai panduan.");
-          loadDemoData();
+        }
+
+        if (createdSheetsMeta.length > 0) {
+          // Cari "Arus Kas" untuk jadi preview default jika ada, jika tidak, pakai sheet pertama
+          const initialPreview = createdSheetsMeta.find(s => s.name.trim().toLowerCase() === "arus kas")?.name || createdSheetsMeta[0].name;
+          setActiveSheetPreview(initialPreview);
         }
 
       } catch (err) {
@@ -442,6 +529,7 @@ export default function App() {
     };
     reader.readAsArrayBuffer(file);
   };
+
 
   // Menangani seleksi file drop/manual
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -513,14 +601,18 @@ export default function App() {
   // ==========================================
   
   // 1. Total Penghasilan Neto (Pemasukan)
-  const totalPenghasilanNeto = parsedItems
-    .filter(item => item.included && item.category === "penghasilan")
-    .reduce((sum, item) => sum + item.value, 0);
+  const totalPenghasilanNeto = analysisMode === "makro"
+    ? macroPenghasilan
+    : parsedItems
+        .filter(item => item.included && item.category === "penghasilan")
+        .reduce((sum, item) => sum + item.value, 0);
 
   // 2. Filter Harta yang dibeli pada tahun pajak yang dipilih
-  const totalHartaBaru = parsedItems
-    .filter(item => item.included && item.category === "harta" && item.year === selectedYear)
-    .reduce((sum, item) => sum + item.value, 0);
+  const totalHartaBaru = analysisMode === "makro"
+    ? macroHarta
+    : parsedItems
+        .filter(item => item.included && item.category === "harta" && item.year === selectedYear)
+        .reduce((sum, item) => sum + item.value, 0);
 
   // 3. Kas Awal (Konfigurasi atau Harta Kas Lama)
   // Secara default, jika ada kas/tabungan dengan Tahun Perolehan di bawah selectedYear, kita bisa mengasumsikannya sebagai Kas Awal
@@ -529,7 +621,9 @@ export default function App() {
     .reduce((sum, item) => sum + item.value, 0);
 
   // Hubungkan Kas Awal input manual dengan deteksi otomatis jika diinginkan
-  const currentInitialCash = manualInitialCash;
+  const currentInitialCash = analysisMode === "makro"
+    ? macroKasAwal
+    : manualInitialCash;
 
   // 4. Pengeluaran Hidup (Tahunan)
   const annualLivingCost = monthlyLivingCost * 12;
@@ -810,24 +904,48 @@ export default function App() {
             
             {/* PANEL EDIT DAN STRUKTUR EXCEL */}
             <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs space-y-6">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-                <div className="flex items-center space-x-2.5">
-                  <FileSpreadsheet className="w-5 h-5 text-[#1e3a8a]" />
-                  <h3 className="font-semibold text-base font-serif text-slate-900">Rincian Data yang Terdeteksi</h3>
+              <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-100 pb-4 gap-4">
+                <div className="flex flex-col space-y-1">
+                  <div className="flex items-center space-x-2.5">
+                    <FileSpreadsheet className="w-5 h-5 text-[#1e3a8a]" />
+                    <h3 className="font-semibold text-base font-serif text-slate-900">Metode Analisis &amp; Data</h3>
+                  </div>
+                  <p className="text-[10px] text-slate-500 font-sans">
+                    Pilih opsi analisis makro dari Lembar Arus Kas atau detail per-item SPT OP.
+                  </p>
                 </div>
-                <div className="flex items-center space-x-2">
-                  <span className="text-xs text-slate-500">Tahun Pajak SPT:</span>
-                  <select 
-                    value={selectedYear}
-                    onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
-                    className="bg-slate-50 border border-slate-300 text-slate-800 text-xs rounded-lg px-2.5 py-1 focus:ring-1 focus:ring-[#1e3a8a] outline-none font-medium"
-                  >
-                    <option value={2026}>2026</option>
-                    <option value={2025}>2025</option>
-                    <option value={2024}>2024</option>
-                    <option value={2023}>2023</option>
-                    <option value={2022}>2022</option>
-                  </select>
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* SWITCHER METODE */}
+                  <div className="inline-flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setAnalysisMode("makro")}
+                      className={`px-3 py-1 text-[11px] font-bold rounded-md transition duration-150 ${analysisMode === "makro" ? "bg-white text-[#1e3a8a] shadow-xs" : "text-slate-500 hover:text-slate-800"}`}
+                    >
+                      Analisis Makro Pajak
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnalysisMode("rincian")}
+                      className={`px-3 py-1 text-[11px] font-bold rounded-md transition duration-150 ${analysisMode === "rincian" ? "bg-white text-[#1e3a8a] shadow-xs" : "text-slate-500 hover:text-slate-800"}`}
+                    >
+                      Detail Rincian Item
+                    </button>
+                  </div>
+
+                  <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded-lg border border-slate-200">
+                    <span className="text-xs text-slate-500 font-semibold font-sans">Pilih Tahun:</span>
+                    <select 
+                      value={selectedYear}
+                      onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
+                      className="bg-transparent text-[#1e3a8a] text-xs rounded border-0 py-0.5 pl-1 pr-6 focus:ring-0 outline-none font-bold font-mono cursor-pointer"
+                    >
+                      <option value={2024}>2024</option>
+                      <option value={2023}>2023</option>
+                      <option value={2022}>2022</option>
+                      <option value={2021}>2021</option>
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -1226,8 +1344,8 @@ export default function App() {
 
               {/* INPUT SALDO KAS AWAL */}
               <div className="space-y-2">
-                <label className="block text-[10px] font-bold text-slate-700 uppercase tracking-widest font-display">
-                  Saldo Awal Kas &amp; Tabungan (1 Jan):
+                <label className="block text-[10px] font-bold text-slate-705 uppercase tracking-widest font-display">
+                  {analysisMode === "makro" ? "Saldo Awal Kas & Tabungan (1 Jan - Makro):" : "Saldo Awal Kas & Tabungan (1 Jan - Rincian):"}
                 </label>
                 <div className="relative rounded-lg shadow-sm">
                   <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -1235,16 +1353,76 @@ export default function App() {
                   </div>
                   <input
                     type="text"
-                    value={manualInitialCash.toLocaleString("id-ID")}
+                    value={analysisMode === "makro" ? macroKasAwal.toLocaleString("id-ID") : manualInitialCash.toLocaleString("id-ID")}
                     onChange={(e) => {
                       const numeric = e.target.value.replace(/[^0-9]/g, "");
-                      setManualInitialCash(numeric ? parseInt(numeric) : 0);
+                      const val = numeric ? parseInt(numeric, 10) : 0;
+                      if (analysisMode === "makro") {
+                        setMacroKasAwal(val);
+                        setManualInitialCash(val);
+                      } else {
+                        setManualInitialCash(val);
+                      }
                     }}
-                    className="w-full bg-[#f8fafc] border border-slate-300 rounded-lg py-1.5 pl-9 pr-3 text-xs text-slate-800 font-mono font-semibold focus:border-[#1e3a8a] outline-none"
+                    className="w-full bg-[#f8fafc] border border-slate-300 rounded-lg py-1.5 pl-9 pr-3 text-xs text-[#1e3a8a] font-mono font-bold focus:border-[#1e3a8a] outline-none"
                   />
                 </div>
-                <p className="text-[10px] text-slate-400 text-right font-mono">
-                  DJP melacak saldo buku rekening awal tahun
+                <p className="text-[9px] text-slate-400 text-right font-mono">
+                  {analysisMode === "makro" ? "Auto-fill dari Baris 12 lembar Arus Kas" : "Atur manual sebagai penyeimbang kas rincian"}
+                </p>
+              </div>
+
+              {/* INPUT TOTAL PENGHASILAN */}
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-705 uppercase tracking-widest font-display">
+                  Total Penghasilan Neto:
+                </label>
+                <div className="relative rounded-lg shadow-sm">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <span className="text-slate-400 text-xs font-bold">Rp</span>
+                  </div>
+                  <input
+                    type="text"
+                    disabled={analysisMode === "rincian"}
+                    value={totalPenghasilanNeto.toLocaleString("id-ID")}
+                    onChange={(e) => {
+                      if (analysisMode === "makro") {
+                        const numeric = e.target.value.replace(/[^0-9]/g, "");
+                        setMacroPenghasilan(numeric ? parseInt(numeric, 10) : 0);
+                      }
+                    }}
+                    className={`w-full border rounded-lg py-1.5 pl-9 pr-3 text-xs font-mono font-bold outline-none ${analysisMode === "rincian" ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed" : "bg-[#f8fafc] border-slate-300 text-slate-800 focus:border-[#1e3a8a]"}`}
+                  />
+                </div>
+                <p className="text-[9px] text-slate-400 text-right font-mono">
+                  {analysisMode === "makro" ? "Auto-fill dari Baris 17 lembar Arus Kas" : "Dihitung bottom-up dari item rincian"}
+                </p>
+              </div>
+
+              {/* INPUT TOTAL HARTA */}
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-705 uppercase tracking-widest font-display">
+                  Total Penambahan Harta Baru ({selectedYear}):
+                </label>
+                <div className="relative rounded-lg shadow-sm">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <span className="text-slate-400 text-xs font-bold">Rp</span>
+                  </div>
+                  <input
+                    type="text"
+                    disabled={analysisMode === "rincian"}
+                    value={totalHartaBaru.toLocaleString("id-ID")}
+                    onChange={(e) => {
+                      if (analysisMode === "makro") {
+                        const numeric = e.target.value.replace(/[^0-9]/g, "");
+                        setMacroHarta(numeric ? parseInt(numeric, 10) : 0);
+                      }
+                    }}
+                    className={`w-full border rounded-lg py-1.5 pl-9 pr-3 text-xs font-mono font-bold outline-none ${analysisMode === "rincian" ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed" : "bg-[#f8fafc] border-slate-300 text-slate-800 focus:border-[#1e3a8a]"}`}
+                  />
+                </div>
+                <p className="text-[9px] text-slate-400 text-right font-mono">
+                  {analysisMode === "makro" ? "Auto-fill dari Baris 16 lembar Arus Kas" : "Dihitung bottom-up dari item rincian"}
                 </p>
               </div>
 
